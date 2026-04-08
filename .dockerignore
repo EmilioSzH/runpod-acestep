@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+.git
+.gitignore
+.venv
+venv
+test_request.py
+setup_volume.py
+README.md
+runpod_test.*
