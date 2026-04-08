@@ -70,6 +70,72 @@ _current_lora_scale: float = 1.0
 # Tasks that REQUIRE xl-base (cannot run on xl-turbo)
 XL_BASE_TASKS = {"extract", "lego", "complete"}
 
+# Default PEFT adapter config for ACE-Step LoRAs (matches the official chinese-new-year format)
+DEFAULT_LORA_CONFIG = {
+    "alpha_pattern": {},
+    "auto_mapping": None,
+    "base_model_name_or_path": "ACE-Step/Ace-Step1.5",
+    "bias": "none",
+    "fan_in_fan_out": False,
+    "inference_mode": True,
+    "init_lora_weights": True,
+    "loftq_config": {},
+    "lora_alpha": 128,
+    "lora_bias": False,
+    "lora_dropout": 0.1,
+    "modules_to_save": None,
+    "peft_type": "LORA",
+    "r": 64,
+    "rank_pattern": {},
+    "revision": None,
+    "target_modules": ["k_proj", "v_proj", "o_proj", "q_proj"],
+    "task_type": "FEATURE_EXTRACTION",
+    "use_dora": False,
+    "use_rslora": False,
+}
+
+
+def autofix_loras():
+    """Idempotent fix-up of LoRA directories on the volume.
+    - Renames non-standard safetensors files to adapter_model.safetensors
+    - Creates missing adapter_config.json from a sane default
+    Runs on every cold start; cheap if everything's already in order.
+    """
+    if not os.path.isdir(LORAS_DIR):
+        return
+
+    for name in sorted(os.listdir(LORAS_DIR)):
+        d = os.path.join(LORAS_DIR, name)
+        if not os.path.isdir(d):
+            continue
+
+        config_file = os.path.join(d, "adapter_config.json")
+        adapter_file = os.path.join(d, "adapter_model.safetensors")
+
+        # If the standard adapter file is missing, look for any *.safetensors and rename
+        if not os.path.exists(adapter_file):
+            candidates = [
+                f for f in os.listdir(d)
+                if f.endswith(".safetensors") and not f.startswith(".")
+            ]
+            if candidates:
+                src = os.path.join(d, candidates[0])
+                try:
+                    os.rename(src, adapter_file)
+                    print(f"[autofix_loras] Renamed {candidates[0]} -> adapter_model.safetensors in {name}")
+                except OSError as e:
+                    print(f"[autofix_loras] Failed to rename in {name}: {e}")
+
+        # If config is missing but we have a safetensors, create a default config
+        if not os.path.exists(config_file) and os.path.exists(adapter_file):
+            import json as _json
+            try:
+                with open(config_file, "w") as f:
+                    _json.dump(DEFAULT_LORA_CONFIG, f, indent=2)
+                print(f"[autofix_loras] Created default adapter_config.json for {name}")
+            except OSError as e:
+                print(f"[autofix_loras] Failed to write config for {name}: {e}")
+
 
 # --- Genre / key expansion (mirrors Python and JS clients) ---
 GENRE_TAGS = {
@@ -143,6 +209,9 @@ def initialize_model(config_name: Optional[str] = None):
             f"Checkpoints directory not found at {CHECKPOINTS_DIR}. "
             f"Make sure the network volume is mounted and contains the model."
         )
+
+    # Fix any broken LoRA dirs (idempotent, fast)
+    autofix_loras()
 
     _handler = AceStepHandler()
 
