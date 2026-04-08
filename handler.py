@@ -305,14 +305,18 @@ def generate(input_data: Dict[str, Any]) -> Dict[str, Any]:
     repaint_end = float(input_data.get("repaint_end", 0.0))
 
     # Determine which model to use
-    # Priority: explicit "model" in request > task type requirement > default
+    # Priority: explicit "model" in request > task type requirement > quality flag > default
     explicit_model = input_data.get("model")
+    quality_mode = input_data.get("quality", "fast")  # "fast" (turbo) or "best" (sft)
+
     if explicit_model:
         target_model = explicit_model
     elif task_type in XL_BASE_TASKS:
         target_model = "acestep-v15-xl-base"
+    elif quality_mode == "best":
+        target_model = "acestep-v15-xl-sft"
     else:
-        target_model = CONFIG_PATH
+        target_model = CONFIG_PATH  # default xl-turbo
 
     # Swap model if needed
     try:
@@ -320,8 +324,8 @@ def generate(input_data: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"error": f"Model load error: {str(e)}"}
 
-    # XL-base needs more steps than turbo for quality
-    if "xl-base" in target_model and inference_steps < 20:
+    # xl-base and xl-sft need more steps than turbo for quality
+    if ("xl-base" in target_model or "xl-sft" in target_model) and inference_steps < 20:
         inference_steps = 50
 
     # Handle base64-encoded source audio (for cover/repaint/lego/extract/complete)
