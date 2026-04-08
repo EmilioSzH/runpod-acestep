@@ -307,7 +307,7 @@ def generate(input_data: Dict[str, Any]) -> Dict[str, Any]:
     # Determine which model to use
     # Priority: explicit "model" in request > task type requirement > quality flag > default
     explicit_model = input_data.get("model")
-    quality_mode = input_data.get("quality", "fast")  # "fast" (turbo) or "best" (sft)
+    quality_mode = input_data.get("quality", "fast")  # "fast" | "best" | "diverse"
 
     if explicit_model:
         target_model = explicit_model
@@ -315,6 +315,8 @@ def generate(input_data: Dict[str, Any]) -> Dict[str, Any]:
         target_model = "acestep-v15-xl-base"
     elif quality_mode == "best":
         target_model = "acestep-v15-xl-sft"
+    elif quality_mode == "diverse":
+        target_model = "acestep-v15-xl-base"
     else:
         target_model = CONFIG_PATH  # default xl-turbo
 
