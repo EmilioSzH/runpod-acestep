@@ -257,31 +257,39 @@ def generate(input_data: Dict[str, Any]) -> Dict[str, Any]:
     if not audios:
         return {"error": "no audio in result"}
 
-    # Read the first audio file and base64 encode it
-    audio_path = audios[0].get("path")
-    if not audio_path or not os.path.exists(audio_path):
-        return {"error": f"audio file not found: {audio_path}"}
+    # ACE-Step returns list of {"tensor": torch.Tensor [C,N], "sample_rate": int}
+    audio_dict = audios[0]
+    tensor = audio_dict.get("tensor")
+    sr = audio_dict.get("sample_rate", 48000)
 
-    with open(audio_path, "rb") as f:
-        audio_bytes = f.read()
+    if tensor is None:
+        return {"error": "no tensor in audio result"}
+
+    # Encode the tensor to MP3 bytes via soundfile -> in-memory wav -> mp3 conversion
+    import io
+    import soundfile as sf
+
+    # tensor is [channels, samples] float32 on CPU
+    arr = tensor.detach().cpu().numpy().T  # -> [samples, channels]
+
+    buf = io.BytesIO()
+    sf.write(buf, arr, sr, format="WAV", subtype="PCM_16")
+    audio_bytes = buf.getvalue()
+    fmt = "wav"
 
     audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
 
-    # Determine format from extension
-    ext = os.path.splitext(audio_path)[1].lstrip(".").lower() or "mp3"
-
-    # Clean up the file
-    try:
-        os.remove(audio_path)
-    except OSError:
-        pass
+    # Get extra info if available
+    extra = result.get("extra_outputs", {}) or {}
+    seed_value = extra.get("seed", extra.get("seed_value", "?"))
 
     return {
         "audio_base64": audio_b64,
-        "format": ext,
+        "format": fmt,
+        "sample_rate": sr,
         "duration": duration,
         "expanded_prompt": expanded,
-        "seed": audios[0].get("seed_value", "?"),
+        "seed": str(seed_value),
         "model": CONFIG_PATH,
         "lora": _current_lora,
         "lora_scale": _current_lora_scale if _current_lora else None,
