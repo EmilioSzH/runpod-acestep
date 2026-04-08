@@ -132,7 +132,7 @@ def initialize_model():
     print(f"[Init] CPU offload: {offload}")
 
     status, ok = _handler.initialize_service(
-        project_root=CHECKPOINTS_DIR,
+        project_root=VOLUME_ROOT,
         config_path=CONFIG_PATH,
         device="cuda" if torch.cuda.is_available() else "cpu",
         use_flash_attention=True,
