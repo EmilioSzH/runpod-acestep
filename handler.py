@@ -51,16 +51,24 @@ LORAS_DIR = os.path.join(VOLUME_ROOT, "loras")
 CONFIG_PATH = os.environ.get("ACESTEP_CONFIG_PATH", "acestep-v15-xl-turbo")
 LM_MODEL = os.environ.get("ACESTEP_LM_MODEL", "acestep-5Hz-lm-0.6B")
 
-# Make sure ACE-Step is importable
-sys.path.insert(0, "/app/ACE-Step-1.5")
+# Make sure ACE-Step is importable (volume location, falls back to /app)
+for p in ("/runpod-volume/ACE-Step-1.5", "/app/ACE-Step-1.5"):
+    if os.path.isdir(p):
+        sys.path.insert(0, p)
+        break
 
 from acestep.handler import AceStepHandler  # noqa: E402
 
-# --- Globals (loaded once on cold start) ---
+# --- Globals ---
+# Single handler at a time (24 GB VRAM can't hold both XL models simultaneously)
 _handler: Optional[AceStepHandler] = None
-_loaded_loras: Dict[str, str] = {}  # lora_name -> path (PEFT cache)
+_handler_config: Optional[str] = None  # which model is currently loaded
+_loaded_loras: Dict[str, str] = {}  # lora_name -> path
 _current_lora: Optional[str] = None
 _current_lora_scale: float = 1.0
+
+# Tasks that REQUIRE xl-base (cannot run on xl-turbo)
+XL_BASE_TASKS = {"extract", "lego", "complete"}
 
 
 # --- Genre / key expansion (mirrors Python and JS clients) ---
@@ -100,14 +108,33 @@ def expand_prompt(user_prompt: str, bpm: Optional[int], key: Optional[str], genr
     return ", ".join(parts)
 
 
-def initialize_model():
-    """Cold start: load the base ACE-Step model. Called once per worker."""
-    global _handler
+def initialize_model(config_name: Optional[str] = None):
+    """Load the requested ACE-Step model. Swaps if a different one is loaded."""
+    global _handler, _handler_config, _current_lora, _current_lora_scale, _loaded_loras
 
-    if _handler is not None:
+    target = config_name or CONFIG_PATH
+
+    # Already loaded with the right model — nothing to do
+    if _handler is not None and _handler_config == target:
         return
 
-    print(f"[Init] Loading ACE-Step model: {CONFIG_PATH}")
+    # Different model loaded — unload it first
+    if _handler is not None:
+        print(f"[Init] Swapping model: {_handler_config} -> {target}")
+        try:
+            del _handler
+        except Exception:
+            pass
+        _handler = None
+        _handler_config = None
+        _current_lora = None
+        _current_lora_scale = 1.0
+        _loaded_loras = {}
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+    print(f"[Init] Loading ACE-Step model: {target}")
     print(f"[Init] Checkpoints dir: {CHECKPOINTS_DIR}")
     print(f"[Init] LoRAs dir: {LORAS_DIR}")
 
@@ -133,7 +160,7 @@ def initialize_model():
 
     status, ok = _handler.initialize_service(
         project_root=VOLUME_ROOT,
-        config_path=CONFIG_PATH,
+        config_path=target,
         device="cuda" if torch.cuda.is_available() else "cpu",
         use_flash_attention=True,
         compile_model=False,
@@ -143,9 +170,11 @@ def initialize_model():
 
     print(f"[Init] {status}")
     if not ok:
+        _handler = None
         raise RuntimeError(f"Failed to initialize model: {status}")
 
-    print("[Init] Model ready")
+    _handler_config = target
+    print(f"[Init] Model ready: {target}")
 
 
 def ensure_lora(lora_name: Optional[str], lora_scale: float):
@@ -206,6 +235,26 @@ def generate(input_data: Dict[str, Any]) -> Dict[str, Any]:
     repaint_start = float(input_data.get("repaint_start", 0.0))
     repaint_end = float(input_data.get("repaint_end", 0.0))
 
+    # Determine which model to use
+    # Priority: explicit "model" in request > task type requirement > default
+    explicit_model = input_data.get("model")
+    if explicit_model:
+        target_model = explicit_model
+    elif task_type in XL_BASE_TASKS:
+        target_model = "acestep-v15-xl-base"
+    else:
+        target_model = CONFIG_PATH
+
+    # Swap model if needed
+    try:
+        initialize_model(target_model)
+    except Exception as e:
+        return {"error": f"Model load error: {str(e)}"}
+
+    # XL-base needs more steps than turbo for quality
+    if "xl-base" in target_model and inference_steps < 20:
+        inference_steps = 50
+
     # Handle base64-encoded source audio (for cover/repaint/lego/extract/complete)
     src_audio_path = None
     src_audio_b64 = input_data.get("src_audio_base64")
@@ -227,6 +276,12 @@ def generate(input_data: Dict[str, Any]) -> Dict[str, Any]:
     expanded = expand_prompt(prompt, bpm, key, genre)
     print(f"[Generate] task={task_type} track={track_name} prompt={expanded}")
 
+    # Build instruction (uses track_name for lego/extract)
+    instruction = _handler.generate_instruction(
+        task_type=task_type,
+        track_name=track_name,
+    )
+
     start = time.time()
     result = _handler.generate_music(
         captions=expanded,
@@ -242,6 +297,7 @@ def generate(input_data: Dict[str, Any]) -> Dict[str, Any]:
         src_audio=src_audio_path,
         repainting_start=repaint_start,
         repainting_end=repaint_end if repaint_end > 0 else -1,
+        instruction=instruction,
     )
     elapsed = time.time() - start
 
@@ -290,7 +346,8 @@ def generate(input_data: Dict[str, Any]) -> Dict[str, Any]:
         "duration": duration,
         "expanded_prompt": expanded,
         "seed": str(seed_value),
-        "model": CONFIG_PATH,
+        "model": _handler_config or target_model,
+        "task_type": task_type,
         "lora": _current_lora,
         "lora_scale": _current_lora_scale if _current_lora else None,
         "generation_time": round(elapsed, 2),
